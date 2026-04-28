@@ -26,6 +26,7 @@ endif()
 
 # Find dependencies
 find_package(ament_cmake REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_components REQUIRED)
 find_package(sensor_msgs REQUIRED)
@@ -84,6 +85,7 @@ ament_target_dependencies(tensorrt_depth_anything
   rclcpp
   sensor_msgs
   cv_bridge
+  ament_index_cpp
 )
 
 # Create Depth Anything v3 node library
