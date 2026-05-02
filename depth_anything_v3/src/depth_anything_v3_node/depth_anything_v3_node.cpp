@@ -24,6 +24,8 @@
 #include <numeric>
 #include <unordered_map>
 
+#include <ament_index_cpp/get_package_share_directory.hpp>
+
 namespace
 {
 template <class T>
@@ -58,7 +60,7 @@ DepthAnythingV3Node::DepthAnythingV3Node(const rclcpp::NodeOptions & node_option
   set_param_res_ =
     this->add_on_set_parameters_callback(std::bind(&DepthAnythingV3Node::onSetParam, this, _1));
   
-  node_param_.onnx_path = declare_parameter<std::string>(
+  node_param_.onnx_path = ament_index_cpp::get_package_share_directory("depth_anything_v3") + "/" + declare_parameter<std::string>(
     "onnx_path", "models/DA3METRIC-LARGE.fp16-batch1.engine");
   node_param_.precision = declare_parameter<std::string>("precision", "fp16");
   
