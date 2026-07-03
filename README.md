@@ -70,6 +70,8 @@ Depending on your driver and CUDA version you need to select the appropriate bas
 
 All parameters can be configured via `config/depth_anything_v3.param.yaml` or passed at launch time.
 
+There is no separate `image_transport` parameter. Set the remapped image topic directly to the desired topic, including transport suffixes such as `/compressed` when needed.
+
 ### Model Configuration
 
 | Parameter | Type | Default | Description |
@@ -121,6 +123,11 @@ ros2 launch depth_anything_v3 depth_anything_v3.launch.py \
     input_camera_info_topic:=/your_camera/camera_info \
     output_depth_topic:=/depth_anything_v3/depth \
     output_point_cloud_topic:=/depth_anything_v3/points
+
+# For compressed image transport
+ros2 launch depth_anything_v3 depth_anything_v3.launch.py \
+    input_image_topic:=/your_camera/image_raw/compressed \
+    input_camera_info_topic:=/your_camera/camera_info
 ```
 
 ### With Debug Enabled
