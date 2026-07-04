@@ -23,6 +23,3 @@ jobs:
           ros-distro: jazzy
           rmw-implementation: rmw_zenoh_cpp
           command: ros2 launch depth_anything_v3 depth_anything_v3.launch.py
-          enable-industrial-ci: true
-        env:
-          TARGET_CMAKE_ARGS: -DCMAKE_EXPORT_COMPILE_COMMANDS=1
