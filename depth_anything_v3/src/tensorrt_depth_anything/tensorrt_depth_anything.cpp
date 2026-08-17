@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <algorithm>
+#include <array>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -404,6 +405,9 @@ void TensorRTDepthAnything::postprocess(
       }
     }
     if (!valid_depths.empty()) {
+      // For 100k < size < 200k the step below is 1, so the sample is the first
+      // 100k valid pixels in row-major order rather than a subsample spread over
+      // the frame. The fill value is calibrated against that, so it is kept.
       size_t sample_size = valid_depths.size();
       const size_t max_sample = 100000;
       if (sample_size > max_sample) {
@@ -415,9 +419,31 @@ void TensorRTDepthAnything::postprocess(
         }
         valid_depths.swap(sampled);
       }
-      const size_t idx = static_cast<size_t>(0.99 * (valid_depths.size() - 1));
-      std::nth_element(valid_depths.begin(), valid_depths.begin() + idx, valid_depths.end());
-      const float max_depth = std::min(valid_depths[idx], sky_depth_cap_);
+      // 99th percentile from a histogram rather than a full nth_element pass.
+      constexpr int kBins = 4096;
+      float lo = valid_depths[0], hi = valid_depths[0];
+      for (const float v : valid_depths) {
+        lo = std::min(lo, v);
+        hi = std::max(hi, v);
+      }
+      float max_depth;
+      if (hi <= lo) {
+        max_depth = std::min(lo, sky_depth_cap_);
+      } else {
+        std::array<uint32_t, kBins> hist{};
+        const float bin_scale = (kBins - 1) / (hi - lo);
+        for (const float v : valid_depths) {
+          ++hist[static_cast<int>((v - lo) * bin_scale)];
+        }
+        const size_t target = static_cast<size_t>(0.99 * (valid_depths.size() - 1));
+        size_t cumulative = 0;
+        int bin = 0;
+        for (; bin < kBins; ++bin) {
+          cumulative += hist[bin];
+          if (cumulative > target) break;
+        }
+        max_depth = std::min(lo + static_cast<float>(bin) / bin_scale, sky_depth_cap_);
+      }
       cv::Mat depth_map_reshaped(height, width, CV_32FC1, depth_map.data);
       depth_map_reshaped.setTo(max_depth, ~sky_mask_);
     }
