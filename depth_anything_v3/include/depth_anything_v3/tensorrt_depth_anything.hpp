@@ -17,6 +17,7 @@
 
 #include <cuda_utils/cuda_unique_ptr.hpp>
 #include <cuda_utils/stream_unique_ptr.hpp>
+#include <cstdint>
 #include <memory>
 #include <opencv2/opencv.hpp>
 #include <string>
@@ -31,6 +32,11 @@ using cuda_utils::CudaUniquePtr;
 using cuda_utils::CudaUniquePtrHost;
 using cuda_utils::makeCudaStream;
 using cuda_utils::StreamUniquePtr;
+
+// Defined in preprocess_gpu.cu
+void launchPreprocess(
+  const uint8_t * src_bgr, int src_width, int src_height,
+  float * dst_nchw, int dst_width, int dst_height, cudaStream_t stream);
 
 /**
  * @class TensorRTDepthAnything
@@ -86,7 +92,7 @@ public:
 
 private:
   /**
-   * @brief run preprocess including resizing, letterbox, NHWC2NCHW and toFloat on CPU
+   * @brief run preprocess including resizing, NHWC2NCHW and toFloat on GPU
    * @param[in] images batching images
    */
   void preprocess(const std::vector<cv::Mat> & images);
@@ -119,7 +125,6 @@ public:
   std::unique_ptr<tensorrt_common::TrtCommon> trt_common_;
 
   // Input/output buffers
-  std::vector<float> input_h_;
   CudaUniquePtr<float[]> input_d_;
 
   // Output buffer for predicted depth
@@ -142,6 +147,7 @@ public:
   bool use_gpu_preprocess_;
   CudaUniquePtrHost<unsigned char[]> image_buf_h_;
   CudaUniquePtr<unsigned char[]> image_buf_d_;
+  size_t image_buf_bytes_{0};
 
   int src_width_;
   int src_height_;

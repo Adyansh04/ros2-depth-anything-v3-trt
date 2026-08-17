@@ -185,7 +185,6 @@ TensorRTDepthAnything::TensorRTDepthAnything(
   // Allocate input memory
   const size_t input_elem_num = batch_size_ * input_channels * input_height_ * input_width_;
   input_d_ = cuda_utils::make_unique<float[]>(input_elem_num);
-  input_h_.resize(input_elem_num);
 
 }
 
@@ -222,7 +221,7 @@ bool TensorRTDepthAnything::doInference(
     return false;
   }
 
-  // Preprocess (GPU preprocessing not yet implemented, using CPU)
+  // Preprocess
   preprocess(images);
 
   // Run inference
@@ -239,7 +238,6 @@ bool TensorRTDepthAnything::doInference(
 
 void TensorRTDepthAnything::preprocess(const std::vector<cv::Mat> & images)
 {
-  const auto batch_size = images.size();
   auto input_dims = trt_common_->getBindingDimensions(0);
   if (input_dims.d[0] == -1) {
     input_dims.d[0] = batch_size_;
@@ -248,39 +246,22 @@ void TensorRTDepthAnything::preprocess(const std::vector<cv::Mat> & images)
 
   input_height_ = input_dims.d[2];
   input_width_ = input_dims.d[3];
-  const int input_chan = input_dims.d[1];
   scale_x_ = static_cast<double>(input_width_) / static_cast<double>(src_width_);
   scale_y_ = static_cast<double>(input_height_) / static_cast<double>(src_height_);
 
-
-  std::vector<cv::Mat> resized_images;
-  resized_images.reserve(batch_size);
-  for (const auto & image : images) {
-    cv::Mat resized_image;
-    cv::resize(image, resized_image, cv::Size(input_width_, input_height_), 0, 0, cv::INTER_CUBIC);
-    resized_images.emplace_back(resized_image);
+  // Upload the frame and let one kernel write the normalised NCHW tensor
+  // straight into the engine's input buffer.
+  const cv::Mat & src_image = images[0];
+  const size_t src_bytes = static_cast<size_t>(src_image.cols) * src_image.rows * 3;
+  if (!image_buf_d_ || src_bytes != image_buf_bytes_) {
+    image_buf_d_ = cuda_utils::make_unique<unsigned char[]>(src_bytes);
+    image_buf_bytes_ = src_bytes;
   }
-
-  const size_t volume = batch_size * input_chan * input_height_ * input_width_;
-  input_h_.resize(volume);
-
-  const float mean[3] = {0.485f, 0.456f, 0.406f};
-  const float std_vals[3] = {0.229f, 0.224f, 0.225f};
-
-  // (v/255 - mean) / std  folded into convertTo's alpha/beta, per plane.
-  // cv::split gives B,G,R so destination channel c reads plane (chan-1-c).
-  const size_t plane = static_cast<size_t>(input_height_) * input_width_;
-  std::vector<cv::Mat> src_planes;
-  for (size_t n = 0; n < batch_size; ++n) {
-    cv::split(resized_images[n], src_planes);
-    for (int c = 0; c < input_chan; ++c) {
-      cv::Mat dst_plane(
-        input_height_, input_width_, CV_32F,
-        input_h_.data() + n * input_chan * plane + static_cast<size_t>(c) * plane);
-      src_planes[input_chan - 1 - c].convertTo(
-        dst_plane, CV_32F, 1.0 / (255.0 * std_vals[c]), -mean[c] / std_vals[c]);
-    }
-  }
+  CHECK_CUDA_ERROR(cudaMemcpyAsync(
+    image_buf_d_.get(), src_image.data, src_bytes, cudaMemcpyHostToDevice, *stream_));
+  launchPreprocess(
+    image_buf_d_.get(), src_image.cols, src_image.rows,
+    input_d_.get(), input_width_, input_height_, *stream_);
 
   auto * engine = trt_common_->getEngine();
   for (int i = 0; i < trt_common_->getNbIOTensors(); ++i) {
@@ -301,10 +282,6 @@ void TensorRTDepthAnything::preprocess(const std::vector<cv::Mat> & images)
       }
     }
   }
-
-  CHECK_CUDA_ERROR(cudaMemcpyAsync(
-    input_d_.get(), input_h_.data(), input_h_.size() * sizeof(float), cudaMemcpyHostToDevice,
-    *stream_));
 }
 
 bool TensorRTDepthAnything::infer()

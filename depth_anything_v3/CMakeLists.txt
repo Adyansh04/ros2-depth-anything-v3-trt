@@ -67,6 +67,7 @@ include_directories(
 
 # Create TensorRT depth inference library
 add_library(tensorrt_depth_anything SHARED
+  src/tensorrt_depth_anything/preprocess_gpu.cu
   src/tensorrt_depth_anything/tensorrt_depth_anything.cpp
   src/tensorrt_common/tensorrt_common.cpp
   src/tensorrt_common/simple_profiler.cpp
