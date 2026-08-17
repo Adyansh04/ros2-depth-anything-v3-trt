@@ -261,34 +261,23 @@ void TensorRTDepthAnything::preprocess(const std::vector<cv::Mat> & images)
   }
 
   const size_t volume = batch_size * input_chan * input_height_ * input_width_;
-  input_h_.assign(volume, 0.0f);
+  input_h_.resize(volume);
 
-  const std::vector<float> mean{0.485f, 0.456f, 0.406f};
-  const std::vector<float> std_vals{0.229f, 0.224f, 0.225f};
+  const float mean[3] = {0.485f, 0.456f, 0.406f};
+  const float std_vals[3] = {0.229f, 0.224f, 0.225f};
 
-  const size_t strides_cv[4] = {
-    static_cast<size_t>(input_width_ * input_chan * input_height_),
-    static_cast<size_t>(input_width_ * input_chan),
-    static_cast<size_t>(input_chan), 1};
-  const size_t strides[4] = {
-    static_cast<size_t>(input_height_ * input_width_ * input_chan),
-    static_cast<size_t>(input_height_ * input_width_),
-    static_cast<size_t>(input_width_), 1};
-
+  // (v/255 - mean) / std  folded into convertTo's alpha/beta, per plane.
+  // cv::split gives B,G,R so destination channel c reads plane (chan-1-c).
+  const size_t plane = static_cast<size_t>(input_height_) * input_width_;
+  std::vector<cv::Mat> src_planes;
   for (size_t n = 0; n < batch_size; ++n) {
-    const auto & img = resized_images[n];
-    const auto * src_ptr = img.data;
-    for (int h = 0; h < input_height_; ++h) {
-      for (int w = 0; w < input_width_; ++w) {
-        for (int c = 0; c < input_chan; ++c) {
-          const size_t offset_cv =
-            h * strides_cv[1] + w * strides_cv[2] + (input_chan - c - 1) * strides_cv[3];
-          const size_t offset =
-            n * strides[0] + c * strides[1] + h * strides[2] + w * strides[3];
-          const float value = static_cast<float>(src_ptr[offset_cv]) / 255.0f;
-          input_h_[offset] = (value - mean[c]) / std_vals[c];
-        }
-      }
+    cv::split(resized_images[n], src_planes);
+    for (int c = 0; c < input_chan; ++c) {
+      cv::Mat dst_plane(
+        input_height_, input_width_, CV_32F,
+        input_h_.data() + n * input_chan * plane + static_cast<size_t>(c) * plane);
+      src_planes[input_chan - 1 - c].convertTo(
+        dst_plane, CV_32F, 1.0 / (255.0 * std_vals[c]), -mean[c] / std_vals[c]);
     }
   }
 
