@@ -377,12 +377,6 @@ void TensorRTDepthAnything::postprocess(
   cv::Mat sky_pred(height, width, CV_32FC1, const_cast<float *>(sky_h_.get()));
   sky_mask_ = sky_pred < sky_threshold_;
 
-  // Inspect raw output before scaling.
-  double raw_min = 0.0, raw_max = 0.0;
-  cv::minMaxLoc(model_depth_, &raw_min, &raw_max);
-  RCLCPP_DEBUG(
-    rclcpp::get_logger("TensorRTDepthAnything"),
-    "Raw net output min/max: %.6f / %.6f", raw_min, raw_max);
 
   // Clean and scale to metric depth.
   cv::Mat depth_map = model_depth_.clone();
@@ -432,14 +426,6 @@ void TensorRTDepthAnything::postprocess(
   // Persist scaled depth for point cloud generation at network resolution.
   model_depth_ = depth_map.clone();
 
-  double min_metric = 0.0, max_metric = 0.0;
-  cv::minMaxLoc(model_depth_, &min_metric, &max_metric);
-  RCLCPP_DEBUG(
-    rclcpp::get_logger("TensorRTDepthAnything"),
-    "Metric depth (model) min/max: %.6f / %.6f meters", min_metric, max_metric);
-  RCLCPP_DEBUG(
-    rclcpp::get_logger("TensorRTDepthAnything"),
-    "Focal length in pixels: %.6f (scale factor: %.6f)", focal_pixels, focal_scale);
 
   cv::resize(model_depth_, depth_image_, cv::Size(src_width_, src_height_), 0, 0, cv::INTER_CUBIC);
 
