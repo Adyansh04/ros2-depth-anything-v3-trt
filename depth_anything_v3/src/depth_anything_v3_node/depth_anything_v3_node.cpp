@@ -169,9 +169,9 @@ void DepthAnythingV3Node::onImageCameraInfo(
   const sensor_msgs::msg::CameraInfo::ConstSharedPtr & camera_info_msg)
 {
 
-  cv_bridge::CvImagePtr in_image_ptr;
+  cv_bridge::CvImageConstPtr in_image_ptr;
   try {
-    in_image_ptr = cv_bridge::toCvCopy(image_msg, sensor_msgs::image_encodings::BGR8);
+    in_image_ptr = cv_bridge::toCvShare(image_msg, sensor_msgs::image_encodings::BGR8);
   } catch (cv_bridge::Exception & e) {
     RCLCPP_ERROR(this->get_logger(), "cv_bridge exception: %s", e.what());
     return;

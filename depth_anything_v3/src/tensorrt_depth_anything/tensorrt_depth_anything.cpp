@@ -338,8 +338,6 @@ bool TensorRTDepthAnything::infer()
     return false;
   }
 
-  CHECK_CUDA_ERROR(cudaStreamSynchronize(*stream_));
-
   return true;
 }
 
@@ -402,7 +400,7 @@ void TensorRTDepthAnything::buildPointCloud(
   cv::Mat color;
   if (!rgb_image.empty()) {
     if (rgb_image.type() == CV_8UC3) {
-      color = rgb_image.clone();
+      color = rgb_image;
     } else {
       rgb_image.convertTo(color, CV_8UC3);
     }
