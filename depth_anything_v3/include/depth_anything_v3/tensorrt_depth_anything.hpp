@@ -15,9 +15,10 @@
 #ifndef DEPTH_ANYTHING_V3__TENSORRT_DEPTH_ANYTHING_HPP_
 #define DEPTH_ANYTHING_V3__TENSORRT_DEPTH_ANYTHING_HPP_
 
+#include <cstdint>
+
 #include <cuda_utils/cuda_unique_ptr.hpp>
 #include <cuda_utils/stream_unique_ptr.hpp>
-#include <cstdint>
 #include <memory>
 #include <opencv2/opencv.hpp>
 #include <string>
@@ -37,6 +38,15 @@ using cuda_utils::StreamUniquePtr;
 void launchPreprocess(
   const uint8_t * src_bgr, int src_width, int src_height,
   float * dst_nchw, int dst_width, int dst_height, cudaStream_t stream);
+
+// Defined in postprocess_gpu.cu
+size_t postprocessScratchBytes(int num_pixels);
+void launchPostprocess(
+  const float * depth_raw, const float * sky_raw, int width, int height,
+  float focal_scale, float sky_threshold, float sky_depth_cap,
+  int out_width, int out_height,
+  float * depth_out, uint8_t * mask_out, float * depth_full_out,
+  void * scratch_buffer, size_t scratch_bytes, cudaStream_t stream);
 
 /**
  * @class TensorRTDepthAnything
@@ -111,6 +121,15 @@ private:
   void postprocess(const sensor_msgs::msg::CameraInfo & camera_info, int downsample_factor = 1, const cv::Mat & rgb_image = cv::Mat());
 
   /**
+   * @brief (re)allocate the postprocessing buffers when the resolution changes
+   * @param[in] width network output width
+   * @param[in] height network output height
+   * @param[in] out_width published depth image width
+   * @param[in] out_height published depth image height
+   */
+  void initPostprocessBuffers(int width, int height, int out_width, int out_height);
+
+  /**
    * @brief Build point cloud from depth image using camera intrinsics
    * @param[in] camera_info camera calibration parameters
    * @param[in] downsample_factor only publish every Nth point
@@ -129,11 +148,9 @@ public:
 
   // Output buffer for predicted depth
   CudaUniquePtr<float[]> depth_d_;
-  CudaUniquePtrHost<float[]> depth_h_;
   size_t depth_elem_num_{};
   // Output buffer for predicted sky
   CudaUniquePtr<float[]> sky_d_;
-  CudaUniquePtrHost<float[]> sky_h_;
   size_t sky_elem_num_{};
   std::vector<CudaUniquePtr<float[]>> extra_output_buffers_;
   cv::Mat model_depth_;
@@ -148,6 +165,17 @@ public:
   CudaUniquePtrHost<unsigned char[]> image_buf_h_;
   CudaUniquePtr<unsigned char[]> image_buf_d_;
   size_t image_buf_bytes_{0};
+
+  // postprocessing buffers, allocated for the current input/output size
+  CudaUniquePtr<float[]> depth_scaled_d_;
+  CudaUniquePtr<float[]> depth_full_d_;
+  CudaUniquePtr<uint8_t[]> sky_mask_d_;
+  CudaUniquePtr<uint8_t[]> post_scratch_d_;
+  size_t post_scratch_bytes_{0};
+  int post_width_{0};
+  int post_height_{0};
+  int post_out_width_{0};
+  int post_out_height_{0};
 
   int src_width_;
   int src_height_;

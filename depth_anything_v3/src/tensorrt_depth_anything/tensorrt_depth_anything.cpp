@@ -13,7 +13,6 @@
 // limitations under the License.
 
 #include <algorithm>
-#include <array>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -170,11 +169,9 @@ TensorRTDepthAnything::TensorRTDepthAnything(
     throw std::runtime_error("Expected TensorRT engine to expose 'sky' output tensor, but none was found");
   }
 
-  // Allocate GPU/CPU memory for outputs
+  // Allocate GPU memory for outputs
   depth_d_ = cuda_utils::make_unique<float[]>(depth_elem_num_);
-  depth_h_ = cuda_utils::make_unique_host<float[]>(depth_elem_num_, cudaHostAllocDefault);
   sky_d_ = cuda_utils::make_unique<float[]>(sky_elem_num_);
-  sky_h_ = cuda_utils::make_unique_host<float[]>(sky_elem_num_, cudaHostAllocDefault);
 
   // Get input dimensions
   const auto input_dims = trt_common_->getBindingDimensions(0);
@@ -201,6 +198,28 @@ void TensorRTDepthAnything::initPreprocessBuffer(int width, int height)
       image_size * batch_size_, cudaHostAllocDefault);
     image_buf_d_ = cuda_utils::make_unique<unsigned char[]>(image_size * batch_size_);
   }
+}
+
+void TensorRTDepthAnything::initPostprocessBuffers(
+  int width, int height, int out_width, int out_height)
+{
+  if (width == post_width_ && height == post_height_ &&
+    out_width == post_out_width_ && out_height == post_out_height_)
+  {
+    return;
+  }
+
+  const size_t plane_size = static_cast<size_t>(width) * height;
+  depth_scaled_d_ = cuda_utils::make_unique<float[]>(plane_size);
+  depth_full_d_ = cuda_utils::make_unique<float[]>(static_cast<size_t>(out_width) * out_height);
+  sky_mask_d_ = cuda_utils::make_unique<uint8_t[]>(plane_size);
+  post_scratch_bytes_ = postprocessScratchBytes(static_cast<int>(plane_size));
+  post_scratch_d_ = cuda_utils::make_unique<uint8_t[]>(post_scratch_bytes_);
+
+  post_width_ = width;
+  post_height_ = height;
+  post_out_width_ = out_width;
+  post_out_height_ = out_height;
 }
 
 bool TensorRTDepthAnything::doInference(
@@ -272,13 +291,11 @@ void TensorRTDepthAnything::preprocess(const std::vector<cv::Mat> & images)
       if (required_output_elems != depth_elem_num_) {
         depth_elem_num_ = required_output_elems;
         depth_d_ = cuda_utils::make_unique<float[]>(depth_elem_num_);
-        depth_h_ = cuda_utils::make_unique_host<float[]>(depth_elem_num_, cudaHostAllocDefault);
       }
     } else if (name && std::string(name) == "sky") {
       if (required_output_elems != sky_elem_num_) {
         sky_elem_num_ = required_output_elems;
         sky_d_ = cuda_utils::make_unique<float[]>(sky_elem_num_);
-        sky_h_ = cuda_utils::make_unique_host<float[]>(sky_elem_num_, cudaHostAllocDefault);
       }
     }
   }
@@ -305,7 +322,6 @@ bool TensorRTDepthAnything::infer()
     } else if (tensor_name == "sky" || tensor_name.find("sky") != std::string::npos) {
       if (!sky_d_ && sky_elem_num_ > 0) {
         sky_d_ = cuda_utils::make_unique<float[]>(sky_elem_num_);
-        sky_h_ = cuda_utils::make_unique_host<float[]>(sky_elem_num_, cudaHostAllocDefault);
       }
       buffer_ptr = sky_d_ ? static_cast<void *>(sky_d_.get()) : static_cast<void *>(depth_d_.get());
     } else {
@@ -322,16 +338,6 @@ bool TensorRTDepthAnything::infer()
     return false;
   }
 
-  CHECK_CUDA_ERROR(cudaMemcpyAsync(
-    depth_h_.get(), depth_d_.get(), depth_elem_num_ * sizeof(float),
-    cudaMemcpyDeviceToHost, *stream_));
-
-  if (sky_d_ && sky_h_) {
-    CHECK_CUDA_ERROR(cudaMemcpyAsync(
-      sky_h_.get(), sky_d_.get(), sky_elem_num_ * sizeof(float),
-      cudaMemcpyDeviceToHost, *stream_));
-  }
-
   CHECK_CUDA_ERROR(cudaStreamSynchronize(*stream_));
 
   return true;
@@ -344,94 +350,38 @@ void TensorRTDepthAnything::postprocess(
   const int height = output_dims.nbDims > 2 ? output_dims.d[2] : input_height_;
   const int width = output_dims.nbDims > 3 ? output_dims.d[3] : input_width_;
 
-  // Use depth output directly
-  const float * depth_ptr = depth_h_.get();
   const size_t plane_size = static_cast<size_t>(height) * width;
-  model_depth_.create(height, width, CV_32FC1);
-  std::memcpy(model_depth_.data, depth_ptr, plane_size * sizeof(float));
-
-  // Sky output
-  sky_mask_.release();
-  cv::Mat sky_pred(height, width, CV_32FC1, const_cast<float *>(sky_h_.get()));
-  sky_mask_ = sky_pred < sky_threshold_;
-
-
-  // Clean and scale to metric depth.
-  cv::Mat depth_map = model_depth_.clone();
-  depth_map.setTo(0.0f, depth_map <= 0.0f);
+  const size_t full_size = static_cast<size_t>(src_width_) * src_height_;
 
   // Use original intrinsics for metric conversion per spec.
   const double fx = camera_info.k[0] * scale_x_;
   const double fy = camera_info.k[4] * scale_y_;
   const double focal_pixels = 0.5 * (fx + fy);
   const double focal_scale = focal_pixels > 0.0 ? focal_pixels / 300.0 : 1.0;
-  depth_map *= static_cast<float>(focal_scale);
 
-  // Handle sky: set sky pixels to max depth derived from non-sky regions.
-  if (!sky_mask_.empty()) {
-    std::vector<float> valid_depths;
-    valid_depths.reserve(plane_size);
-    const uint8_t * mask_ptr = sky_mask_.ptr<uint8_t>(0);
-    const float * depth_ptr_flat = reinterpret_cast<const float *>(depth_map.data);
-    for (size_t idx = 0; idx < plane_size; ++idx) {
-      if (mask_ptr[idx]) {
-        const float val = depth_ptr_flat[idx];
-        if (std::isfinite(val) && val > 0.0f) {
-          valid_depths.push_back(val);
-        }
-      }
-    }
-    if (!valid_depths.empty()) {
-      // For 100k < size < 200k the step below is 1, so the sample is the first
-      // 100k valid pixels in row-major order rather than a subsample spread over
-      // the frame. The fill value is calibrated against that, so it is kept.
-      size_t sample_size = valid_depths.size();
-      const size_t max_sample = 100000;
-      if (sample_size > max_sample) {
-        const size_t step = sample_size / max_sample;
-        std::vector<float> sampled;
-        sampled.reserve(max_sample);
-        for (size_t i = 0; i < sample_size && sampled.size() < max_sample; i += step) {
-          sampled.push_back(valid_depths[i]);
-        }
-        valid_depths.swap(sampled);
-      }
-      // 99th percentile from a histogram rather than a full nth_element pass.
-      constexpr int kBins = 4096;
-      float lo = valid_depths[0], hi = valid_depths[0];
-      for (const float v : valid_depths) {
-        lo = std::min(lo, v);
-        hi = std::max(hi, v);
-      }
-      float max_depth;
-      if (hi <= lo) {
-        max_depth = std::min(lo, sky_depth_cap_);
-      } else {
-        std::array<uint32_t, kBins> hist{};
-        const float bin_scale = (kBins - 1) / (hi - lo);
-        for (const float v : valid_depths) {
-          ++hist[static_cast<int>((v - lo) * bin_scale)];
-        }
-        const size_t target = static_cast<size_t>(0.99 * (valid_depths.size() - 1));
-        size_t cumulative = 0;
-        int bin = 0;
-        for (; bin < kBins; ++bin) {
-          cumulative += hist[bin];
-          if (cumulative > target) break;
-        }
-        max_depth = std::min(lo + static_cast<float>(bin) / bin_scale, sky_depth_cap_);
-      }
-      cv::Mat depth_map_reshaped(height, width, CV_32FC1, depth_map.data);
-      depth_map_reshaped.setTo(max_depth, ~sky_mask_);
-    }
-  }
+  // Scaling, the sky mask, the sky fill and the upscale to camera resolution all
+  // run on the depth map the engine produced; only the published results are
+  // copied back.
+  initPostprocessBuffers(width, height, src_width_, src_height_);
+  launchPostprocess(
+    depth_d_.get(), sky_d_.get(), width, height,
+    static_cast<float>(focal_scale), sky_threshold_, sky_depth_cap_,
+    src_width_, src_height_,
+    depth_scaled_d_.get(), sky_mask_d_.get(), depth_full_d_.get(),
+    post_scratch_d_.get(), post_scratch_bytes_, *stream_);
 
-  // Persist scaled depth for point cloud generation at network resolution.
-  model_depth_ = depth_map.clone();
-
-
-  cv::resize(model_depth_, depth_image_, cv::Size(src_width_, src_height_), 0, 0, cv::INTER_CUBIC);
-
+  model_depth_.create(height, width, CV_32FC1);
+  sky_mask_.create(height, width, CV_8UC1);
+  depth_image_.create(src_height_, src_width_, CV_32FC1);
+  CHECK_CUDA_ERROR(cudaMemcpyAsync(
+    model_depth_.data, depth_scaled_d_.get(), plane_size * sizeof(float),
+    cudaMemcpyDeviceToHost, *stream_));
+  CHECK_CUDA_ERROR(cudaMemcpyAsync(
+    sky_mask_.data, sky_mask_d_.get(), plane_size, cudaMemcpyDeviceToHost, *stream_));
+  CHECK_CUDA_ERROR(cudaMemcpyAsync(
+    depth_image_.data, depth_full_d_.get(), full_size * sizeof(float),
+    cudaMemcpyDeviceToHost, *stream_));
+  CHECK_CUDA_ERROR(cudaStreamSynchronize(*stream_));
 
   cv::Mat colorized = rgb_image;
   if (!colorized.empty() &&
