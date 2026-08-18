@@ -271,13 +271,15 @@ void TensorRTDepthAnything::preprocess(const std::vector<cv::Mat> & images)
   // Upload the frame and let one kernel write the normalised NCHW tensor
   // straight into the engine's input buffer.
   const cv::Mat & src_image = images[0];
-  const size_t src_bytes = static_cast<size_t>(src_image.cols) * src_image.rows * 3;
+  const size_t row_bytes = static_cast<size_t>(src_image.cols) * 3;
+  const size_t src_bytes = row_bytes * src_image.rows;
   if (!image_buf_d_ || src_bytes != image_buf_bytes_) {
     image_buf_d_ = cuda_utils::make_unique<unsigned char[]>(src_bytes);
     image_buf_bytes_ = src_bytes;
   }
-  CHECK_CUDA_ERROR(cudaMemcpyAsync(
-    image_buf_d_.get(), src_image.data, src_bytes, cudaMemcpyHostToDevice, *stream_));
+  CHECK_CUDA_ERROR(cudaMemcpy2DAsync(
+    image_buf_d_.get(), row_bytes, src_image.data, src_image.step,
+    row_bytes, src_image.rows, cudaMemcpyHostToDevice, *stream_));
   launchPreprocess(
     image_buf_d_.get(), src_image.cols, src_image.rows,
     input_d_.get(), input_width_, input_height_, *stream_);
